@@ -8,7 +8,6 @@
     "derive": "powershell -ExecutionPolicy Bypass -File scripts/derive_assets.ps1",
     "predev": "npm run derive",
     "dev": "vite",
-    "prebuild": "npm run derive",
     "build": "vite build",
     "preview": "vite preview"
   },

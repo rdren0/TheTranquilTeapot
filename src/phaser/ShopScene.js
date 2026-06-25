@@ -14,10 +14,12 @@ import { canMake } from "../game/state.js";
 // ===========================================================================
 const W = 724;
 const H = 543;
-// The world is laid out in W x H units. The canvas is rendered DISPLAY_SCALE
-// larger (and the camera zoomed to match) so the whole cafe + assets draw 25%
-// bigger and fill more of the browser window — no world coordinates change.
-const DISPLAY_SCALE = 1.25;
+// The world is laid out in W x H units. The canvas is rendered at DISPLAY_W
+// wide (height follows the world's aspect ratio) and the camera is zoomed to
+// match, so the whole cafe + assets draw bigger and fill more of the browser
+// window — no world coordinates change.
+const DISPLAY_W = 1200;
+const DISPLAY_SCALE = DISPLAY_W / W;
 
 // Walkable floor rectangle (inside the painted walls).
 const FLOOR = { x1: 70, y1: 150, x2: 654, y2: 470 };
