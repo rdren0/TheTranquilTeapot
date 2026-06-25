@@ -8,4 +8,3 @@ dist-ssr
 
 # Purchased art assets — licensed to this project, NOT for redistribution.
 # Keep them out of version control (especially if the repo is ever public).
-public/assets/cafe/
