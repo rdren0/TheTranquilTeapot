@@ -1,0 +1,24 @@
+{
+  "name": "tranquil-teapot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The Tranquil Teapot — a cozy tea shop management game.",
+  "scripts": {
+    "derive": "powershell -ExecutionPolicy Bypass -File scripts/derive_assets.ps1",
+    "predev": "npm run derive",
+    "dev": "vite",
+    "prebuild": "npm run derive",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
