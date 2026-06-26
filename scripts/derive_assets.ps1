@@ -190,17 +190,57 @@ function DeriveSheet($srcPath, $cols, $rows, $cw, $ch, $outName) {
   $canvas.g.Dispose(); SaveBoth $canvas.bmp $outName; $canvas.bmp.Dispose(); $bmp.Dispose()
 }
 
+# Split a strip buffer into $fpr [x0,x1] column ranges. Frames are often NOT
+# evenly spaced, so cut at the widest interior transparent gaps between content
+# (one fewer cut than frames). Falls back to an even division when there aren't
+# enough gaps (e.g. frames that touch).
+function FrameBounds($p, $fpr) {
+  $w = $p.w; $h = $p.h
+  $occ = New-Object bool[] $w
+  for ($x = 0; $x -lt $w; $x++) {
+    for ($y = 0; $y -lt $h; $y += 2) {
+      if ($p.buf[($y * $p.stride) + ($x * 4) + 3] -gt 24) { $occ[$x] = $true; break }
+    }
+  }
+  $first = -1; $last = -1
+  for ($x = 0; $x -lt $w; $x++) { if ($occ[$x]) { if ($first -lt 0) { $first = $x }; $last = $x } }
+  $even = { $sw = $w / $fpr; $r = @(); for ($k = 0; $k -lt $fpr; $k++) { $r += , @([int]($k * $sw), ([int](($k + 1) * $sw) - 1)) }; return $r }
+  if ($first -lt 0) { return (& $even) }
+  $gaps = @(); $gs = -1
+  for ($x = $first; $x -le $last; $x++) {
+    if (-not $occ[$x]) { if ($gs -lt 0) { $gs = $x } }
+    elseif ($gs -ge 0) { $gaps += [pscustomobject]@{ start = $gs; end = $x - 1; width = $x - $gs }; $gs = -1 }
+  }
+  if ($gaps.Count -lt ($fpr - 1)) { return (& $even) }
+  $cuts = @($gaps | Sort-Object width -Descending | Select-Object -First ($fpr - 1) |
+      ForEach-Object { [int](($_.start + $_.end) / 2) } | Sort-Object)
+  $bounds = @(); $prev = 0
+  foreach ($c in $cuts) { $bounds += , @($prev, $c); $prev = $c + 1 }
+  $bounds += , @($prev, ($w - 1))
+  return $bounds
+}
+
 # ---- Per-direction strip files (each a single row of $fpr frames) -> one sheet
-# in the given order, one uniform scale + shared baseline across all frames. ----
-function DeriveStrips($dir, $order, $fpr, $cw, $ch, $outName) {
+# in the given order, one uniform scale + shared baseline across all frames.
+# $upscale (optional name->factor map) pre-enlarges lower-res strips so they
+# don't come out tiny under the shared scale. ----
+function DeriveStrips($dir, $order, $fpr, $cw, $ch, $outName, $upscale) {
   $strips = @(); $maxH = 0; $maxW = 0
   foreach ($name in $order) {
     $bmp = LoadArgb (Join-Path $dir "$name.png")
+    $f = if ($upscale -and $upscale.ContainsKey($name)) { $upscale[$name] } else { 1 }
+    if ($f -ne 1) {
+      $uw = [int][math]::Round($bmp.Width * $f); $uh = [int][math]::Round($bmp.Height * $f)
+      $u = New-Object System.Drawing.Bitmap $uw, $uh, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+      $ug = [System.Drawing.Graphics]::FromImage($u)
+      $ug.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+      $ug.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+      $ug.DrawImage($bmp, 0, 0, $uw, $uh); $ug.Dispose(); $bmp.Dispose(); $bmp = $u
+    }
     $p = GetBuf $bmp $false
-    $sw = $p.w / $fpr
     $frames = @()
-    for ($f = 0; $f -lt $fpr; $f++) {
-      $b = BBox $p ([int]($f * $sw)) 0 ([int](($f + 1) * $sw) - 1) ($p.h - 1)
+    foreach ($bb in (FrameBounds $p $fpr)) {
+      $b = BBox $p $bb[0] 0 $bb[1] ($p.h - 1)
       $frames += $b
       if ($b.found) { if ($b.bh -gt $maxH) { $maxH = $b.bh }; if ($b.bw -gt $maxW) { $maxW = $b.bw } }
     }
@@ -254,17 +294,28 @@ $meSrcs = (1..14 | ForEach-Object { "$me\$_.png" })
 if ((NeedsBuild "player_front" $meSrcs) -or (NeedsBuild "player_back" $meSrcs)) {
   DeriveFrames $me @(1, 2, 3, 4, 5, 6, 7) @(8, 9, 10, 11, 12, 13, 14) "player_front" "player_back"
 }
-# Cat: per-direction strip files in cat/ (each a 4-frame row) -> one 32-frame
-# sheet ordered N,NW,W,SW,S,SE,E,NE so rows map to the scene's direction anims.
+# Cat: per-direction strip files in cat/DIRECTIONAL/ (each a 4-frame row) -> one
+# 32-frame sheet ordered N,NW,W,SW,S,SE,E,NE so rows map to the scene's dir anims.
 $catDir = Join-Path $chr "cat"
+$catWalkDir = Join-Path $catDir "DIRECTIONAL"
 $catOrder = @("N", "NW", "W", "SW", "S", "SE", "E", "NE")
-$catSrcs = ($catOrder | ForEach-Object { Join-Path $catDir "$_.png" })
+$catSrcs = ($catOrder | ForEach-Object { Join-Path $catWalkDir "$_.png" })
+# N/S are lower-res originals; enlarge them ~2.8x so they aren't dwarfed by the
+# higher-res diagonal/side strips under DeriveStrips' single shared scale.
 if (NeedsBuild "cat_dirs" $catSrcs) {
-  DeriveStrips $catDir $catOrder 4 64 48 "cat_dirs"
+  DeriveStrips $catWalkDir $catOrder 4 64 48 "cat_dirs" @{ N = 2.8; S = 2.8 }
 }
-# Cat pounce: 5x5 = 25 frames (wider cell for the leap).
-if (NeedsBuild "cat_pounce" @("$chr\catPounce.png")) {
-  DeriveSheet "$chr\catPounce.png" 5 5 96 48 "cat_pounce"
+# Cat pounce: cat/longPounce.png is a 5x5 = 25-frame pounce facing right.
+if (NeedsBuild "cat_pounce" @("$catDir\longPounce.png")) {
+  DeriveSheet "$catDir\longPounce.png" 5 5 96 48 "cat_pounce"
+}
+# Cat dash: cat/shortPounce.png is a 5x1 = 5-frame quick lunge facing right.
+if (NeedsBuild "cat_dash" @("$catDir\shortPounce.png")) {
+  DeriveSheet "$catDir\shortPounce.png" 5 1 96 48 "cat_dash"
+}
+# Cat jump: cat/jump.png is a 5x5 = 25-frame jump-in-place.
+if (NeedsBuild "cat_jump" @("$catDir\jump.png")) {
+  DeriveSheet "$catDir\jump.png" 5 5 96 48 "cat_jump"
 }
 
 Write-Host "Done."

@@ -47,10 +47,15 @@ const D = "/assets/cafe/derived/";
 const CHAR_SCALE = 1.5;
 const PR = 12;
 // Wandering cat. cat_dirs is a 32-frame 8-direction walk (4 frames/row); rows in
-// order N, NW, W, SW, S, SE, E, NE. cat_pounce is a 25-frame leap facing right.
-const CAT_SCALE = 0.85;
+// order N, NW, W, SW, S, SE, E, NE. The one-shot specials all face right and
+// travel forward, easing to a standstill by their final frame: cat_pounce
+// (25-frame pounce), cat_dash (5-frame lunge), cat_jump (25-frame jump).
+const CAT_SCALE = 1.05;
 const CAT_SPEED = 70;
-const POUNCE_SPEED = 45; // forward lunge speed while the pounce plays
+// Peak forward speed of each special (eased to 0 over the anim, so it lands stationary).
+const POUNCE_SPEED = 95;
+const DASH_SPEED = 240;
+const JUMP_SPEED = 70;
 const CAT_DIRS = ["cat_N", "cat_NW", "cat_W", "cat_SW", "cat_S", "cat_SE", "cat_E", "cat_NE"];
 // Customers are all "Hank": a directional walk cycle with a front (toward the
 // camera) and back (away) sheet. Side movement reuses these with a flipX.
@@ -117,7 +122,9 @@ export default class ShopScene extends Phaser.Scene {
       this.load.spritesheet(k, `${D}${k}.png`, { frameWidth: 32, frameHeight: 48 }),
     );
     this.load.spritesheet("cat_dirs", `${D}cat_dirs.png`, { frameWidth: 64, frameHeight: 48 });
-    this.load.spritesheet("cat_pounce", `${D}cat_pounce.png`, { frameWidth: 96, frameHeight: 48 });
+    ["cat_pounce", "cat_dash", "cat_jump"].forEach((k) =>
+      this.load.spritesheet(k, `${D}${k}.png`, { frameWidth: 96, frameHeight: 48 }),
+    );
   }
 
   create() {
@@ -162,7 +169,7 @@ export default class ShopScene extends Phaser.Scene {
     mkWalk("hank_front", CUST_WALK_FRAMES - 1);
     mkWalk("hank_back", CUST_WALK_FRAMES - 1);
 
-    // Cat: one looping walk anim per direction (4 frames each) + a one-shot pounce.
+    // Cat: one looping walk anim per direction (4 frames each) + one-shot specials.
     CAT_DIRS.forEach((key, row) => {
       if (this.anims.exists(key)) return;
       this.anims.create({
@@ -172,14 +179,18 @@ export default class ShopScene extends Phaser.Scene {
         repeat: -1,
       });
     });
-    if (!this.anims.exists("cat_pounce")) {
+    const mkOneShot = (key, end, frameRate) => {
+      if (this.anims.exists(key)) return;
       this.anims.create({
-        key: "cat_pounce",
-        frames: this.anims.generateFrameNumbers("cat_pounce", { start: 0, end: 24 }),
-        frameRate: 18,
+        key,
+        frames: this.anims.generateFrameNumbers(key, { start: 0, end }),
+        frameRate,
         repeat: 0,
       });
-    }
+    };
+    mkOneShot("cat_pounce", 24, 18);
+    mkOneShot("cat_dash", 4, 14);
+    mkOneShot("cat_jump", 24, 18);
     this.cat = {
       sprite: this.add.sprite(220, 420, "cat_dirs", 16).setOrigin(0.5, 1).setScale(CAT_SCALE),
       state: "pause",
@@ -244,19 +255,23 @@ export default class ShopScene extends Phaser.Scene {
     this.updateCat(delta);
   }
 
-  // Pick the next wander target by choosing a random heading + distance (rather
-  // than a random point), so every direction — including straight south — shows
-  // up roughly evenly instead of mostly diagonals.
+  // Pick the next wander target by choosing a random heading, then walking as far
+  // along it as stays in bounds (up to a random distance). Clamping the distance
+  // rather than rejecting the heading keeps every direction — including straight
+  // N/S, which hit the near walls of the wide-but-short floor — roughly even.
   randomCatPoint() {
     const sp = this.cat.sprite;
+    const ok = (x, y) =>
+      x > FLOOR.x1 + 24 && x < FLOOR.x2 - 24 && y > FLOOR.y1 + 24 && y < FLOOR.y2 - 10 && !this.pointBlocked(x, y);
     for (let i = 0; i < 24; i++) {
       const ang = Phaser.Math.FloatBetween(0, Math.PI * 2);
-      const dist = Phaser.Math.Between(80, 200);
-      const x = sp.x + Math.cos(ang) * dist;
-      const y = sp.y + Math.sin(ang) * dist;
-      if (x > FLOOR.x1 + 24 && x < FLOOR.x2 - 24 && y > FLOOR.y1 + 24 && y < FLOOR.y2 - 10 && !this.pointBlocked(x, y)) {
-        return { x, y };
+      const want = Phaser.Math.Between(80, 200);
+      let best = 0;
+      for (let d = 24; d <= want; d += 12) {
+        if (ok(sp.x + Math.cos(ang) * d, sp.y + Math.sin(ang) * d)) best = d;
+        else break;
       }
+      if (best >= 40) return { x: sp.x + Math.cos(ang) * best, y: sp.y + Math.sin(ang) * best };
     }
     // Fallback: somewhere south of the cat so it heads toward the viewer.
     return { x: Phaser.Math.Clamp(sp.x, FLOOR.x1 + 24, FLOOR.x2 - 24), y: FLOOR.y2 - 30 };
@@ -281,13 +296,17 @@ export default class ShopScene extends Phaser.Scene {
     const sp = cat.sprite;
     sp.setDepth(sp.y);
 
-    if (cat.state === "pounce") {
+    // One-shot specials: travel forward in the facing direction while the anim
+    // plays, easing the speed down to 0 as it finishes so the cat lands stationary
+    // rather than stopping mid-stride. All return to pause when the anim ends.
+    if (cat.state === "pounce" || cat.state === "dash" || cat.state === "jump") {
       if (!sp.anims.isPlaying) {
         cat.state = "pause";
         cat.timer = Phaser.Math.Between(600, 1600);
       } else {
-        // Lunge forward a little in the facing direction while the leap plays.
-        const nx = sp.x + (cat.faceLeft ? -1 : 1) * ((POUNCE_SPEED * delta) / 1000);
+        const base = cat.state === "dash" ? DASH_SPEED : cat.state === "jump" ? JUMP_SPEED : POUNCE_SPEED;
+        const speed = base * (1 - sp.anims.getProgress());
+        const nx = sp.x + (cat.faceLeft ? -1 : 1) * ((speed * delta) / 1000);
         if (!this.pointBlocked(nx, sp.y)) sp.x = nx;
       }
       return;
@@ -296,10 +315,13 @@ export default class ShopScene extends Phaser.Scene {
     if (cat.state === "pause") {
       cat.timer -= delta;
       if (cat.timer <= 0) {
-        if (Math.random() < 0.3) {
-          cat.state = "pounce";
-          sp.setFlipX(cat.faceLeft); // pounce sheet faces right
-          sp.play("cat_pounce");
+        // ~15% pounce, ~13% dash, ~10% jump, else wander to a new spot.
+        const r = Math.random();
+        const special = r < 0.15 ? "pounce" : r < 0.28 ? "dash" : r < 0.38 ? "jump" : null;
+        if (special) {
+          cat.state = special;
+          sp.setFlipX(cat.faceLeft); // special sheets face right
+          sp.play(`cat_${special}`);
         } else {
           cat.target = this.randomCatPoint();
           cat.state = "walk";
